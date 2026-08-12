@@ -1,8 +1,13 @@
 /**
  * Startup Dashboard
  *
- * Replaces the built-in startup header with a rich dashboard shown above
- * the editor. Auto-dismisses on your first input.
+ * Replaces the built-in startup header with a rich dashboard. The dashboard
+ * renders as pi's header, so pi's own loaded-resources / diagnostics band
+ * appears directly beneath it. Auto-dismisses on your first input.
+ *
+ * Pair with `"quietStartup": true` in settings.json to suppress pi's built-in
+ * [Extensions] / [Themes] listings at the top (diagnostics still render).
+ *
  *
  *   /dashboard        Toggle / re-show the dashboard
  *   /dashboard off    Hide it
@@ -16,8 +21,6 @@ import { homedir } from "node:os";
 import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import { SessionManager, VERSION } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
-
-const WIDGET_ID = "startup-dashboard";
 
 // ── data helpers ────────────────────────────────────────────────────────────
 
@@ -530,16 +533,18 @@ async function collectEnvWarnings(ctx: ExtensionContext): Promise<Warning[]> {
 
 export default function (pi: ExtensionAPI) {
 	let dashboardActive = false;
-	let headerReplaced = false;
 
-	function replaceHeader(ctx: ExtensionContext) {
-		if (headerReplaced || !ctx.hasUI) return;
-		// Empty header — the dashboard widget owns everything.
+	function setEmptyHeader(ctx: ExtensionContext) {
+		if (!ctx.hasUI) return;
+		// Collapse the built-in header so nothing lingers when the dashboard is
+		// hidden. Pi's [Extensions]/[Themes] listings are suppressed separately
+		// via `quietStartup: true` in settings; diagnostics still render in
+		// pi's own loadedResourcesContainer, which sits directly beneath the
+		// header — i.e. beneath this dashboard.
 		ctx.ui.setHeader((_tui, _theme) => ({
 			render: (_width: number) => [],
 			invalidate: () => {},
 		}));
-		headerReplaced = true;
 	}
 
 	async function collectData(ctx: ExtensionContext): Promise<DashboardData> {
@@ -604,7 +609,9 @@ export default function (pi: ExtensionAPI) {
 	function showDashboard(ctx: ExtensionContext, data: DashboardData) {
 		dashboardActive = true;
 		liveData = data;
-		ctx.ui.setWidget(WIDGET_ID, (tui, theme) => {
+		// Render the dashboard AS the header so pi's own loaded-resources /
+		// diagnostics band renders directly beneath it.
+		ctx.ui.setHeader((tui, theme) => {
 			capturedTui = tui;
 			return {
 				render(width: number): string[] {
@@ -637,15 +644,16 @@ export default function (pi: ExtensionAPI) {
 			unsubscribe();
 			unsubscribe = null;
 		}
-		ctx.ui.setWidget(WIDGET_ID, undefined);
+		setEmptyHeader(ctx);
 	}
 
 	pi.on("session_start", async (event, ctx) => {
 		if (!ctx.hasUI) return;
 		if (event.reason !== "startup") return;
 
-		// Empty out the built-in header immediately so no duplicate info appears.
-		replaceHeader(ctx);
+		// Empty out the built-in header immediately so no duplicate info appears
+		// while we gather data.
+		setEmptyHeader(ctx);
 		// Mirror warning/error notify() calls into the band.
 		wrapNotify(ctx);
 
@@ -694,7 +702,6 @@ export default function (pi: ExtensionAPI) {
 				ctx.ui.notify("Cleared captured warnings.", "info");
 				return;
 			}
-			replaceHeader(ctx);
 			wrapNotify(ctx);
 			const data = await collectData(ctx);
 			showDashboard(ctx, data);

@@ -1,0 +1,4 @@
+{
+  "app.model.select": "ctrl+m",
+  "app.clear": ["ctrl+l", "ctrl+c"]
+}
