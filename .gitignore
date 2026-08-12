@@ -1,0 +1,24 @@
+# pi-coding-agent global config (~/.pi)
+# Commit shareable config; ignore credentials, caches, installed packages,
+# and per-machine state.
+
+# --- Credentials & per-machine state (NEVER commit) ---
+agent/auth.json
+agent/trust.json
+
+# --- Caches / generated ---
+agent/models-store.json
+agent/logs/
+agent/cache/
+
+# --- Installed packages (reproducible from settings.json) ---
+agent/git/
+agent/npm/
+
+# --- Local session transcripts ---
+agent/sessions/
+
+# --- OS / editor noise ---
+.DS_Store
+*.swp
+*~
