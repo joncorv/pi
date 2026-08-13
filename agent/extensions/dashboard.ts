@@ -1,148 +1,173 @@
 /**
- * Startup Dashboard
+ * Responsive startup dashboard for pi.
  *
- * Replaces the built-in startup header with a rich dashboard. The dashboard
- * renders as pi's header, so pi's own loaded-resources / diagnostics band
- * appears directly beneath it. Auto-dismisses on your first input.
+ * Shows only for an empty session and clears when the first message is sent.
+ * Data comes from pi's public APIs rather than filesystem discovery.
  *
- * Pair with `"quietStartup": true` in settings.json to suppress pi's built-in
- * [Extensions] / [Themes] listings at the top (diagnostics still render).
- *
- *
- *   /dashboard        Toggle / re-show the dashboard
- *   /dashboard off    Hide it
- *   /dashboard on     Show it
+ *   /dashboard                  Toggle the dashboard
+ *   /dashboard on|off           Show or restore the built-in header
+ *   /dashboard auto|full        Select the preferred layout
+ *   /dashboard compact          Force the compact layout
+ *   /dashboard font braille|pixel|line|heavy  Select the two-line display font
+ *   /dashboard warnings|clear   Inspect or clear dashboard health checks
  */
 
-import { execSync } from "node:child_process";
-import { existsSync, readdirSync, statSync } from "node:fs";
-import { basename, join } from "node:path";
-import { homedir } from "node:os";
+import { basename, dirname } from "node:path";
 import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
-import { SessionManager, VERSION } from "@earendil-works/pi-coding-agent";
-import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { keyText, SessionManager, VERSION } from "@earendil-works/pi-coding-agent";
+import { truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 
-// ── data helpers ────────────────────────────────────────────────────────────
+type Severity = "warning" | "error";
+type DashboardWarning = { text: string; severity: Severity };
+type GitInfo = { branch: string; dirtyCount: number } | null;
+type ViewMode = "auto" | "compact" | "full";
+type DisplayFont = "braille" | "pixel" | "line" | "heavy";
 
-type GitInfo = { branch: string; dirty: boolean } | null;
+type RecentSession = {
+	path: string;
+	modified: number;
+	name?: string;
+	firstMessage: string;
+	messageCount: number;
+};
 
-function getGitInfo(cwd: string): GitInfo {
-	try {
-		const branch = execSync("git rev-parse --abbrev-ref HEAD", {
-			cwd,
-			stdio: ["ignore", "pipe", "ignore"],
-			timeout: 500,
-		})
-			.toString()
-			.trim();
-		if (!branch) return null;
-		const status = execSync("git status --porcelain", {
-			cwd,
-			stdio: ["ignore", "pipe", "ignore"],
-			timeout: 500,
-		}).toString();
-		return { branch, dirty: status.trim().length > 0 };
-	} catch {
-		return null;
+type DashboardData = {
+	cwd: string;
+	git: GitInfo;
+	modelId?: string;
+	provider?: string;
+	thinkingLevel: string;
+	contextTokens: number | null;
+	contextWindow: number | null;
+	contextPercent: number | null;
+	activeTheme?: string;
+	extensions: string[];
+	sessions: RecentSession[];
+	warnings: DashboardWarning[];
+	omittedWarnings: number;
+};
+
+const FULL_WIDTH = 74;
+const COLUMN_WIDTH = 36;
+const COLUMN_GAP = 2;
+const MAX_WARNINGS = 10;
+
+const LINE_GLYPHS: Record<string, [string, string]> = {
+	" ": [" ", " "],
+	A: ["╭╮", "├┤"], C: ["╭─", "╰─"], E: ["├─", "└─"], F: ["╭─", "├ "],
+	G: ["╭─", "╰┤"], H: ["││", "├┤"], I: ["┬ ", "┴ "], L: ["│ ", "└─"],
+	M: ["╲╱", "││"], N: ["╲│", "│╲"], O: ["╭╮", "╰╯"], P: ["├╮", "├╯"],
+	R: ["├╮", "│╲"], S: ["╭─", "─╯"], T: ["┬┬", " │"], U: ["││", "╰╯"],
+	Y: ["╲╱", " │"],
+};
+
+const HEAVY_GLYPHS: Record<string, [string, string]> = {
+	" ": [" ", " "],
+	A: ["┏┓", "┣┫"], C: ["┏━", "┗━"], E: ["┣━", "┗━"], F: ["┏━", "┣ "],
+	G: ["┏━", "┗┫"], H: ["┃┃", "┣┫"], I: ["┳ ", "┻ "], L: ["┃ ", "┗━"],
+	M: ["╲╱", "┃┃"], N: ["╲┃", "┃╲"], O: ["┏┓", "┗┛"], P: ["┣┓", "┣┛"],
+	R: ["┣┓", "┃╲"], S: ["┏━", "━┛"], T: ["┳┳", " ┃"], U: ["┃┃", "┗┛"],
+	Y: ["╲╱", " ┃"],
+};
+
+const PIXEL_GLYPHS: Record<string, [string, string, string, string]> = {
+	" ": [" ", " ", " ", " "],
+	C: ["██", "█ ", "█ ", "██"],
+	E: ["███", "█  ", "██ ", "███"],
+	F: ["███", "█  ", "██ ", "█  "],
+	G: ["███", "█  ", "█ █", "███"],
+	H: ["█ █", "███", "█ █", "█ █"],
+	I: ["█", "█", "█", "█"],
+	L: ["█ ", "█ ", "█ ", "██"],
+	M: ["█  █", "████", "█  █", "█  █"],
+	N: ["█ █", "███", "███", "█ █"],
+	O: ["███", "█ █", "█ █", "███"],
+	P: ["███", "█ █", "███", "█  "],
+	R: ["██ ", "█ █", "██ ", "█ █"],
+	S: ["███", "█  ", "  █", "███"],
+	T: ["███", " █ ", " █ ", " █ "],
+	U: ["█ █", "█ █", "█ █", "███"],
+	Y: ["█ █", " █ ", " █ ", " █ "],
+};
+
+const BRAILLE_GLYPHS: Record<string, string[]> = {
+	" ": ["000", "000", "000", "000", "000", "000", "000"],
+	A: ["010", "101", "101", "111", "101", "101", "101"],
+	E: ["111", "100", "100", "110", "100", "100", "111"],
+	F: ["111", "100", "100", "110", "100", "100", "100"],
+	H: ["101", "101", "101", "111", "101", "101", "101"],
+	M: ["101", "111", "111", "101", "101", "101", "101"],
+	I: ["111", "010", "010", "010", "010", "010", "111"],
+	N: ["101", "111", "111", "111", "111", "111", "101"],
+	O: ["010", "101", "101", "101", "101", "101", "010"],
+	P: ["110", "101", "101", "110", "100", "100", "100"],
+	R: ["110", "101", "101", "110", "101", "101", "101"],
+	S: ["111", "100", "100", "111", "001", "001", "111"],
+	T: ["111", "010", "010", "010", "010", "010", "010"],
+	U: ["101", "101", "101", "101", "101", "101", "111"],
+};
+
+const HEADER_SLOGAN = "CTHULU IS COMING FOR YOUR REPO";
+const BRAILLE_SLOGAN = "NO REPO IS SAFE FROM HIM";
+
+function brailleText(text: string): [string, string] {
+	const dotBits = [
+		[0x01, 0x08],
+		[0x02, 0x10],
+		[0x04, 0x20],
+		[0x40, 0x80],
+	];
+	const pixelRows = Array.from({ length: 8 }, () => "");
+	for (const char of text.toUpperCase()) {
+		const glyph = BRAILLE_GLYPHS[char] ?? BRAILLE_GLYPHS[" "];
+		for (let row = 0; row < 8; row++) pixelRows[row] += `${glyph[row] ?? "000"}0`;
 	}
-}
-
-function greeting(): string {
-	const h = new Date().getHours();
-	if (h < 5) return "Burning the midnight oil";
-	if (h < 12) return "Good morning";
-	if (h < 18) return "Good afternoon";
-	if (h < 22) return "Good evening";
-	return "Working late";
-}
-
-function relativeTime(ts: number): string {
-	const diff = Math.max(0, Date.now() - ts);
-	const m = Math.floor(diff / 60_000);
-	if (m < 1) return "just now";
-	if (m < 60) return `${m}m ago`;
-	const h = Math.floor(m / 60);
-	if (h < 24) return `${h}h ago`;
-	const d = Math.floor(h / 24);
-	if (d < 30) return `${d}d ago`;
-	const mo = Math.floor(d / 30);
-	if (mo < 12) return `${mo}mo ago`;
-	return `${Math.floor(mo / 12)}y ago`;
-}
-
-const TIPS = [
-	"Type @ in the editor to fuzzy-search project files.",
-	"Prefix a line with ! to run bash and send output to the LLM (!! runs silently).",
-	"Enter queues a steering message; Alt+Enter queues a follow-up.",
-	"/fork branches from a past message; /clone duplicates the current branch.",
-	"Drop images onto the terminal or paste with Ctrl+V.",
-	"Write reusable prompts in ~/.pi/agent/prompts/name.md and call /name.",
-	"pi is aggressively extensible — ask it to build the tool you wish existed.",
-];
-
-function tipOfTheMoment(): string {
-	const bucket = Math.floor(Date.now() / (10 * 60_000));
-	return TIPS[bucket % TIPS.length];
-}
-
-/** Read simple names from an extensions directory (files + subdirs). */
-function listExtensions(): string[] {
-	const roots = [join(homedir(), ".pi", "agent", "extensions"), join(process.cwd(), ".pi", "extensions")];
-	const seen = new Set<string>();
-	const out: string[] = [];
-	for (const root of roots) {
-		if (!existsSync(root)) continue;
-		let entries: string[] = [];
-		try {
-			entries = readdirSync(root);
-		} catch {
-			continue;
-		}
-		for (const e of entries) {
-			if (e.startsWith(".")) continue;
-			let name = e;
-			if (e.endsWith(".ts") || e.endsWith(".js") || e.endsWith(".mjs")) {
-				name = e.replace(/\.(ts|js|mjs)$/, "");
-			} else {
-				try {
-					if (!statSync(join(root, e)).isDirectory()) continue;
-				} catch {
-					continue;
+	const renderRow = (rowOffset: number): string => {
+		let output = "";
+		for (let column = 0; column < pixelRows[0].length; column += 2) {
+			let bits = 0;
+			for (let y = 0; y < 4; y++) {
+				for (let x = 0; x < 2; x++) {
+					if (pixelRows[rowOffset + y]?.[column + x] === "1") bits |= dotBits[y][x];
 				}
 			}
-			if (seen.has(name)) continue;
-			seen.add(name);
-			out.push(name);
+			output += String.fromCodePoint(0x2800 + bits);
 		}
-	}
-	return out.sort();
+		return output.trimEnd();
+	};
+	return [renderRow(0), renderRow(4)];
 }
 
-function listThemes(): string[] {
-	const builtin = ["dark", "light"];
-	const roots = [join(homedir(), ".pi", "agent", "themes"), join(process.cwd(), ".pi", "themes")];
-	const seen = new Set<string>(builtin);
-	const custom: string[] = [];
-	for (const root of roots) {
-		if (!existsSync(root)) continue;
-		let entries: string[] = [];
-		try {
-			entries = readdirSync(root);
-		} catch {
-			continue;
-		}
-		for (const e of entries) {
-			if (e.startsWith(".")) continue;
-			const name = e.replace(/\.(ts|js|mjs|json)$/, "");
-			if (seen.has(name)) continue;
-			seen.add(name);
-			custom.push(name);
-		}
+function pixelText(text: string): [string, string] {
+	const pixels = ["", "", "", ""];
+	for (const char of text.toUpperCase()) {
+		const glyph = PIXEL_GLYPHS[char] ?? [char, " ", char, " "];
+		for (let row = 0; row < pixels.length; row++) pixels[row] += glyph[row];
 	}
-	return [...custom.sort(), ...builtin];
+	const combine = (upper: string, lower: string): string => {
+		let line = "";
+		for (let index = 0; index < upper.length; index++) {
+			const top = upper[index] === "█";
+			const bottom = lower[index] === "█";
+			line += top && bottom ? "█" : top ? "▀" : bottom ? "▄" : " ";
+		}
+		return line;
+	};
+	return [combine(pixels[0], pixels[1]), combine(pixels[2], pixels[3])];
 }
 
-// ── art ─────────────────────────────────────────────────────────────────────
+function bigText(text: string, font: DisplayFont): [string, string] {
+	if (font === "braille") return brailleText(BRAILLE_SLOGAN);
+	if (font === "pixel") return pixelText(text);
+	const rows: [string[], string[]] = [[], []];
+	const glyphs = font === "heavy" ? HEAVY_GLYPHS : LINE_GLYPHS;
+	for (const char of text.toUpperCase()) {
+		const glyph = glyphs[char] ?? [char, " ".repeat(visibleWidth(char))];
+		rows[0].push(glyph[0]);
+		rows[1].push(glyph[1]);
+	}
+	return [rows[0].join(""), rows[1].join("")];
+}
 
 const BANNER = [
 	"⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⣠⡤⠶⡄⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢠⠶⣦⣀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀",
@@ -150,7 +175,7 @@ const BANNER = [
 	"⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⣴⣿⣿⣿⡇⠀⢼⣿⣽⣿⢻⣿⣻⣿⣟⣷⡄⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢸⣿⣿⣾⣄⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀",
 	"⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⣞⣿⣿⣿⣿⣿⣷⣤⣸⣟⣿⣿⣻⣯⣿⣿⣿⣿⣀⣴⣿⣿⣿⣿⣷⣤⣸⣟⣿⣿⣻⣯⣿⣿⣿⣿⣯⣆⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀",
 	"⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⡼⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣜⡆⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀",
-	"⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢠⣟⣯⣿⣿⣿⣷⢿⣫⣾⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣬⣟⠿⣿⣿⣿⣷⢿⣫⣾⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣬⣟⠿⣿⣿⣿⣿⡷⣾⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀",
+	"⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢠⣟⣯⣿⣿⣿⣷⢿⣫⣾⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣬⣟⠿⣿⣿⣿⣷⢿⣫⣾⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣬⣟⠿⣿⣿⣿⣿⡷⣾⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀",
 	"⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢸⣯⣿⣿⡏⠙⡇⣾⣟⣿⡿⢿⣿⣿⣿⣿⣿⢿⣟⡿⣿⠀⡟⠉⢹⣿⣿⡏⠙⡇⣾⣟⣿⡿⢿⣿⣿⣿⣿⣿⢿⣟⡿⣿⠀⡟⠉⢹⣿⣿⢿⡄⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀",
 	"⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢸⣯⡿⢿⠀⠀⠱⢈⣿⢿⣿⡿⣏⣿⣿⣿⣿⣿⣿⣿⣿⣀⠃⠀⢸⡿⢿⠀⠀⠱⢈⣿⢿⣿⡿⣏⣿⣿⣿⣿⣿⣿⣿⣿⣀⠃⠀⢸⡿⣿⣿⡇⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀",
 	"⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢸⣿⣇⠈⢃⣴⠟⠛⢉⣸⣇⣹⣿⣿⠚⡿⣿⣉⣿⠃⠈⠙⢻⡄⠎⠀⠈⢃⣴⠟⠛⢉⣸⣇⣹⣿⣿⠚⡿⣿⣉⣿⠃⠈⠙⢻⡄⠎⠀⣿⡷⠃⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀",
@@ -160,554 +185,539 @@ const BANNER = [
 	"⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠁⠀⠈⢧⣈⠀⠘⢦⠀⣀⠇⣼⠃⠰⣄⣡⠞⠀⠀⠀⠀⠀⠀⠀⠁⠀⠈⢧⣈⠀⠘⢦⠀⣀⠇⣼⠃⠰⣄⣡⠞⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀",
 	"⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠸⢤⠼⠁⠀⠀⠳⣤⡼⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠸⢤⠼⠁⠀⠀⠳⣤⡼⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀",
 ];
-const BANNER_WIDTH = 74;
 
-// ── layout constants ────────────────────────────────────────────────────────
+const TIPS = [
+	"Type @ in the editor to fuzzy-search project files.",
+	"Prefix a line with ! to run bash (!! keeps output out of model context).",
+	"Enter steers a running agent; the configured follow-up key queues work.",
+	"/fork branches from a past message; /clone duplicates the current branch.",
+	"Drop images onto the terminal or paste them from the clipboard.",
+	"Put reusable prompts in ~/.pi/agent/prompts/name.md and call /name.",
+	"Pi can explain and extend itself — ask it to build the tool you need.",
+];
 
-const CONTENT_WIDTH = BANNER_WIDTH; // 74
-const COL_W = 36;
-const COL_GAP = 2; // 36 + 2 + 36 = 74
-
-// ── rendering primitives ────────────────────────────────────────────────────
-
-function padRight(s: string, width: number): string {
-	const pad = width - visibleWidth(s);
-	return pad > 0 ? s + " ".repeat(pad) : s;
+function relativeTime(timestamp: number): string {
+	const minutes = Math.floor(Math.max(0, Date.now() - timestamp) / 60_000);
+	if (minutes < 1) return "just now";
+	if (minutes < 60) return `${minutes}m ago`;
+	const hours = Math.floor(minutes / 60);
+	if (hours < 24) return `${hours}h ago`;
+	const days = Math.floor(hours / 24);
+	if (days < 30) return `${days}d ago`;
+	const months = Math.floor(days / 30);
+	if (months < 12) return `${months}mo ago`;
+	return `${Math.floor(months / 12)}y ago`;
 }
 
-function centerInWidth(s: string, width: number): string {
-	const vw = visibleWidth(s);
-	if (vw >= width) return s;
-	const left = Math.floor((width - vw) / 2);
-	return " ".repeat(left) + s;
+function compactNumber(value: number): string {
+	return new Intl.NumberFormat(undefined, { notation: "compact", maximumFractionDigits: 1 }).format(value);
 }
 
-function hr(theme: Theme, width: number, char = "─"): string {
-	return theme.fg("borderMuted", char.repeat(Math.max(0, width)));
+function tipOfTheMoment(): string {
+	return TIPS[Math.floor(Date.now() / (10 * 60_000)) % TIPS.length];
+}
+
+function extensionLabel(source: { path: string; source: string }): string {
+	const file = basename(source.path);
+	if (/^index\.(?:ts|js|mjs)$/.test(file)) return basename(dirname(source.path));
+	const label = file.replace(/\.(?:ts|js|mjs)$/, "");
+	return label && !label.startsWith("<") ? label : source.source;
+}
+
+function shortcut(id: Parameters<typeof keyText>[0], fallback: string): string {
+	return keyText(id) || fallback;
+}
+
+function padRight(text: string, width: number): string {
+	const padding = width - visibleWidth(text);
+	return padding > 0 ? text + " ".repeat(padding) : text;
+}
+
+function centered(text: string, width: number): string {
+	const padding = Math.max(0, Math.floor((width - visibleWidth(text)) / 2));
+	return " ".repeat(padding) + text;
+}
+
+function horizontalRule(theme: Theme, width: number, char = "─"): string {
+	return theme.fg("border", char.repeat(Math.max(0, width)));
 }
 
 function sectionHeader(theme: Theme, title: string, width: number): string {
-	const prefix = "── ";
-	const raw = prefix.length + visibleWidth(title) + 1; // "── " + title + " "
-	const dashes = Math.max(0, width - raw);
+	if (width < 5) return truncateToWidth(theme.fg("warning", title), width, "");
+	const used = visibleWidth(title) + 1;
 	return (
-		theme.fg("borderMuted", prefix) +
-		theme.fg("accent", theme.bold(title)) +
+		theme.fg("warning", theme.bold(title)) +
 		" " +
-		theme.fg("borderMuted", "─".repeat(dashes))
+		theme.fg("border", "─".repeat(Math.max(0, width - used)))
+	);
+}
+
+function itemLabel(theme: Theme, icon: string, label: string, width = 12): string {
+	const labelWidth = Math.max(0, width - visibleWidth(icon) - 1);
+	return theme.fg("accent", icon) + " " + theme.fg("muted", padRight(label, labelWidth)) + " ";
+}
+
+function warningLines(theme: Theme, data: DashboardData, width: number): string[] {
+	if (data.warnings.length === 0 && data.omittedWarnings === 0) return [];
+	const lines = [sectionHeader(theme, "󰒓 Health", width)];
+	for (const warning of data.warnings) {
+		const icon = warning.severity === "error" ? "✖" : "⚠";
+		const prefix = `${icon} `;
+		const bodyWidth = Math.max(1, width - visibleWidth(prefix));
+		const wrapped = wrapTextWithAnsi(warning.text, bodyWidth);
+		for (let index = 0; index < wrapped.length; index++) {
+			const line = (index === 0 ? prefix : " ".repeat(visibleWidth(prefix))) + wrapped[index];
+			lines.push(theme.fg(warning.severity, truncateToWidth(line, width, "")));
+		}
+	}
+	if (data.omittedWarnings > 0) {
+		lines.push(theme.fg("dim", `… ${data.omittedWarnings} additional checks omitted`));
+	}
+	return lines;
+}
+
+function gitText(theme: Theme, git: GitInfo): string {
+	if (!git) return theme.fg("dim", "no git");
+	const state = git.dirtyCount > 0 ? `${git.dirtyCount} changed` : "clean";
+	const color = git.dirtyCount > 0 ? "error" : "success";
+	return theme.fg("text", git.branch) + theme.fg("dim", " · ") + theme.fg(color, state);
+}
+
+function contextText(data: DashboardData): string {
+	if (data.contextWindow === null) return "context unavailable";
+	const used = data.contextTokens === null ? "?" : compactNumber(data.contextTokens);
+	const percent = data.contextPercent === null ? "" : ` · ${Math.round(data.contextPercent)}%`;
+	return `${used}/${compactNumber(data.contextWindow)}${percent}`;
+}
+
+function recentSessionLine(theme: Theme, session: RecentSession, width: number): string {
+	const fallback = session.firstMessage.trim() || basename(session.path).replace(/\.jsonl$/, "");
+	const label = (session.name?.trim() || fallback).replace(/\s+/g, " ");
+	const meta = `${session.messageCount} msg · ${relativeTime(session.modified)}`;
+	const prefix = "󰋚 ";
+	const maxLabel = Math.max(4, width - visibleWidth(prefix) - visibleWidth(meta) - 3);
+	return (
+		theme.fg("accent", prefix.trimEnd()) +
+		" " +
+		theme.fg("muted", truncateToWidth(label, maxLabel)) +
+		theme.fg("text", ` · ${meta}`)
 	);
 }
 
 function composeColumns(left: string[], right: string[]): string[] {
-	const rows = Math.max(left.length, right.length);
-	const out: string[] = [];
-	for (let i = 0; i < rows; i++) {
-		const l = left[i] ?? "";
-		const r = right[i] ?? "";
-		const lClipped = visibleWidth(l) > COL_W ? truncateToWidth(l, COL_W) : l;
-		const rClipped = visibleWidth(r) > COL_W ? truncateToWidth(r, COL_W) : r;
-		out.push(padRight(lClipped, COL_W) + " ".repeat(COL_GAP) + rClipped);
+	const count = Math.max(left.length, right.length);
+	const lines: string[] = [];
+	for (let index = 0; index < count; index++) {
+		const leftLine = truncateToWidth(left[index] ?? "", COLUMN_WIDTH, "");
+		const rightLine = truncateToWidth(right[index] ?? "", COLUMN_WIDTH, "");
+		lines.push(padRight(leftLine, COLUMN_WIDTH) + " ".repeat(COLUMN_GAP) + rightLine);
 	}
-	return out;
+	return lines;
 }
 
-// ── dashboard data ──────────────────────────────────────────────────────────
-
-type Severity = "warning" | "error";
-type Warning = { icon?: string; text: string; severity: Severity };
-
-type DashboardData = {
-	cwd: string;
-	git: GitInfo;
-	modelId?: string;
-	provider?: string;
-	extensions: string[];
-	themes: string[];
-	activeTheme?: string;
-	sessions: Array<{ name?: string; file: string; mtime: number; messageCount?: number }>;
-	warnings: Warning[];
-};
-
-// ── render ──────────────────────────────────────────────────────────────────
-
-function renderDashboard(theme: Theme, data: DashboardData, width: number): string[] {
-	const proj = basename(data.cwd) || data.cwd;
-
-	// Banner ------------------------------------------------------------------
-	// Rose palette (rose-pine "love" tones): brighter inside, softer at the edges.
-	const rgb = (r: number, g: number, b: number, s: string) =>
-		`\x1b[38;2;${r};${g};${b}m${s}\x1b[39m`;
-	const ROSE_CORE: [number, number, number] = [235, 111, 146]; // #eb6f92
-	const ROSE_EDGE: [number, number, number] = [193, 112, 127]; // muted rose
-	const ROSE_GLOW: [number, number, number] = [249, 168, 180]; // soft pink glow
-	const bannerColored = BANNER.map((line, i) => {
-		const last = BANNER.length - 1;
-		const edge = i === 0 || i === last;
-		const near = i === 1 || i === last - 1;
-		const [r, g, b] = edge ? ROSE_GLOW : near ? ROSE_EDGE : ROSE_CORE;
-		return rgb(r, g, b, line);
-	});
-
-	// Left column: identity, project, model, environment ---------------------
-	const gitLine = data.git
-		? theme.fg("muted", " on ") +
-			theme.fg(data.git.dirty ? "warning" : "success", data.git.branch) +
-			(data.git.dirty ? theme.fg("warning", " ✱") : theme.fg("success", " ✓"))
-		: theme.fg("dim", " (no git)");
-
-	const greetLine =
-		theme.fg("accent", "❯ ") +
-		theme.fg("text", theme.bold(greeting())) +
-		theme.fg(
-			"muted",
-			`, ${new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`,
-		);
-
-	const projLine = theme.fg("muted", "📁 ") + theme.fg("text", theme.bold(proj)) + gitLine;
-
-	const modelLine =
-		theme.fg("muted", "🧠 ") +
-		theme.fg("text", data.modelId ?? "no model") +
-		(data.provider ? theme.fg("dim", ` · ${data.provider}`) : "");
-
-	const versionLine =
-		theme.fg("muted", "🥧 ") +
-		theme.fg("text", `pi v${VERSION}`) +
-		theme.fg("dim", "  ·  ") +
-		theme.fg("muted", "🎨 ") +
-		theme.fg("text", data.activeTheme ?? "default");
-
-	const leftCol: string[] = [
-		sectionHeader(theme, "Session", COL_W),
-		greetLine,
-		projLine,
-		modelLine,
-		versionLine,
+function fullDashboard(theme: Theme, data: DashboardData): string[] {
+	const project = basename(data.cwd) || data.cwd;
+	const left: string[] = [
+		sectionHeader(theme, "󰉋 Workspace", COLUMN_WIDTH),
+		itemLabel(theme, "󰉋", "project") + theme.fg("text", theme.bold(project)),
+		itemLabel(theme, "", "git") + gitText(theme, data.git),
+		itemLabel(theme, "󰚩", "model") + theme.fg("text", data.modelId ?? "no model"),
+		itemLabel(theme, "󰒋", "provider") + theme.fg("text", data.provider ?? "none"),
+		itemLabel(theme, "󰔟", "thinking") + theme.fg("text", data.thinkingLevel),
+		itemLabel(theme, "󰘦", "context") + theme.fg("text", contextText(data)),
 		"",
-		sectionHeader(theme, "Loaded", COL_W),
+		sectionHeader(theme, "󰪺 Runtime", COLUMN_WIDTH),
+		itemLabel(theme, "󰏖", "pi") + theme.fg("text", `v${VERSION}`),
+		itemLabel(theme, "󰏘", "theme") + theme.fg("text", data.activeTheme ?? "default"),
+		"",
+		sectionHeader(theme, "󰏗 Enabled extensions", COLUMN_WIDTH),
 	];
 	if (data.extensions.length === 0) {
-		leftCol.push(theme.fg("dim", "  (no extensions)"));
+		left.push(theme.fg("dim", "(none detected)"));
 	} else {
-		const shown = data.extensions.slice(0, 5);
-		for (const name of shown) {
-			leftCol.push(theme.fg("muted", "  🧩 ") + theme.fg("text", name));
+		for (const extension of data.extensions.slice(0, 5)) {
+			left.push(theme.fg("accent", "󰏗") + " " + theme.fg("text", extension));
 		}
-		if (data.extensions.length > shown.length) {
-			leftCol.push(theme.fg("dim", `  … +${data.extensions.length - shown.length} more`));
-		}
+		if (data.extensions.length > 5) left.push(theme.fg("dim", `… +${data.extensions.length - 5} more`));
 	}
-	const otherThemes = data.themes.filter((t) => t !== data.activeTheme);
-	const themePreview = otherThemes.slice(0, 3).join(", ");
-	const themeSuffix = otherThemes.length > 3 ? `, … +${otherThemes.length - 3}` : "";
-	leftCol.push(theme.fg("dim", `  themes: ${themePreview}${themeSuffix}`));
 
-	// Right column: recent sessions + shortcuts ------------------------------
-	const rightCol: string[] = [];
-	rightCol.push(sectionHeader(theme, "Recent sessions", COL_W));
+	const right: string[] = [sectionHeader(theme, "󰋚 Recent sessions", COLUMN_WIDTH)];
 	if (data.sessions.length === 0) {
-		rightCol.push(theme.fg("dim", "  (none — fresh project)"));
+		right.push(theme.fg("dim", "(none — fresh project)"));
 	} else {
-		for (const s of data.sessions.slice(0, 4)) {
-			const label = s.name?.trim() || basename(s.file).replace(/\.jsonl$/, "");
-			const shown = label.length > 16 ? label.slice(0, 15) + "…" : label;
-			const meta = relativeTime(s.mtime);
-			rightCol.push(
-				theme.fg("muted", "  • ") + theme.fg("text", shown) + theme.fg("dim", `  ${meta}`),
-			);
+		for (const session of data.sessions.slice(0, 5)) {
+			right.push(recentSessionLine(theme, session, COLUMN_WIDTH));
 		}
-		rightCol.push(theme.fg("dim", "  ↳ pi -c  ·  pi -r"));
+		right.push(theme.fg("dim", "↳ /resume to continue a session"));
 	}
-	rightCol.push("");
-	rightCol.push(sectionHeader(theme, "Shortcuts", COL_W));
+
+	right.push("", sectionHeader(theme, "󰌌 Shortcuts", COLUMN_WIDTH));
 	const shortcuts: Array<[string, string]> = [
 		["@", "reference files"],
-		["/  ·  !cmd", "commands · bash"],
-		["Shift+Tab", "cycle thinking"],
-		["Ctrl+L", "switch model"],
-		["Esc / Esc Esc", "interrupt / /tree"],
-		["Ctrl+C / Ctrl+D", "clear / exit"],
-		["/hotkeys", "show everything"],
+		["/ · !cmd", "commands · bash"],
+		[shortcut("app.thinking.cycle", "shift+tab"), "cycle thinking"],
+		[shortcut("app.model.select", "ctrl+l"), "select model"],
+		[shortcut("app.interrupt", "escape"), "interrupt"],
+		[shortcut("app.message.followUp", "alt+enter"), "queue follow-up"],
+		[shortcut("app.clear", "ctrl+c"), "clear editor"],
+		[shortcut("app.exit", "ctrl+d"), "exit"],
 	];
-	for (const [k, v] of shortcuts) {
-		rightCol.push(theme.fg("accent", `  ${k.padEnd(15)}`) + theme.fg("muted", v));
+	for (const [keys, description] of shortcuts) {
+		right.push(theme.fg("muted", padRight(keys, 16)) + theme.fg("text", description));
 	}
 
-	// Pad shorter column so composeColumns aligns nicely
-	while (leftCol.length < rightCol.length) leftCol.push("");
-	while (rightCol.length < leftCol.length) rightCol.push("");
+	return composeColumns(left, right);
+}
 
-	// Assemble block ---------------------------------------------------------
-	const block: string[] = [];
-	block.push(hr(theme, CONTENT_WIDTH, "━"));
+function compactDashboard(theme: Theme, data: DashboardData, width: number): string[] {
+	const project = basename(data.cwd) || data.cwd;
+	const lines = [
+		sectionHeader(theme, "󰉋 Session", width),
+		itemLabel(theme, "󰉋", "project") + theme.fg("text", project),
+		itemLabel(theme, "", "git") + gitText(theme, data.git),
+		itemLabel(theme, "󰚩", "model") + theme.fg("text", `${data.provider ?? "none"}/${data.modelId ?? "no model"}`),
+		itemLabel(theme, "󰔟", "runtime") + theme.fg("text", `thinking ${data.thinkingLevel} · ${contextText(data)}`),
+		itemLabel(theme, "󰏗", "extensions") + theme.fg("text", data.extensions.join(", ") || "none detected"),
+		"",
+		sectionHeader(theme, "󰋚 Recent", width),
+	];
+	if (data.sessions.length === 0) lines.push(theme.fg("dim", "(none — fresh project)"));
+	else for (const session of data.sessions.slice(0, 3)) lines.push(recentSessionLine(theme, session, width));
+	lines.push(
+		"",
+		sectionHeader(theme, "󰌌 Keys", width),
+		theme.fg("muted", shortcut("app.model.select", "ctrl+l")) + theme.fg("text", " model · ") +
+			theme.fg("muted", shortcut("app.thinking.cycle", "shift+tab")) + theme.fg("text", " thinking · ") +
+			theme.fg("muted", "@") + theme.fg("text", " files"),
+	);
+	return lines;
+}
 
-	// Warnings band (only when there are warnings). Errors render in `error`
-	// colour, warnings in `warning` colour. Long messages wrap across lines.
-	if (data.warnings.length > 0) {
-		const hasError = data.warnings.some((w) => w.severity === "error");
-		const n = data.warnings.length;
-		const headerLabel = hasError
-			? `✖ ${n} warning${n === 1 ? "" : "s"} / errors on load`
-			: `⚠ ${n} warning${n === 1 ? "" : "s"} on load`;
+function minimalDashboard(theme: Theme, data: DashboardData, width: number): string[] {
+	const project = basename(data.cwd) || data.cwd;
+	return [
+		theme.fg("accent", theme.bold("pi")) + theme.fg("muted", ` · ${project}`),
+		theme.fg("text", data.modelId ?? "no model") + theme.fg("dim", ` · ${data.thinkingLevel}`),
+		gitText(theme, data.git),
+	];
+}
+
+function renderDashboard(
+	theme: Theme,
+	data: DashboardData,
+	terminalWidth: number,
+	terminalRows: number,
+	mode: ViewMode,
+	displayFont: DisplayFont,
+): string[] {
+	const width = Math.max(1, terminalWidth);
+	const heightAllowsFull = terminalRows >= 42;
+	const heightAllowsCompact = terminalRows >= 16;
+	const useFull = width >= FULL_WIDTH && mode !== "compact" && (mode === "full" || heightAllowsFull);
+	const useCompact = !useFull && width >= 44 && heightAllowsCompact;
+	const contentWidth = useFull ? FULL_WIDTH : width;
+	const block: string[] = [horizontalRule(theme, contentWidth, "━")];
+
+	block.push(...warningLines(theme, data, contentWidth));
+	if (data.warnings.length > 0 || data.omittedWarnings > 0) block.push(horizontalRule(theme, contentWidth));
+
+	if (useFull) {
+		const slogan = bigText(HEADER_SLOGAN, displayFont);
 		block.push(
-			centerInWidth(
-				theme.fg(hasError ? "error" : "warning", theme.bold(headerLabel)),
-				CONTENT_WIDTH,
-			),
+			...BANNER.map((line) => centered(theme.fg("error", line), contentWidth)),
+			"",
+			...slogan.map((line) => centered(theme.fg("error", line), contentWidth)),
+			"",
 		);
-		for (const w of data.warnings) {
-			const icon = w.icon ?? (w.severity === "error" ? "✖" : "⚠");
-			const prefix = `  ${icon}  `;
-			const prefixWidth = visibleWidth(prefix);
-			const maxTextWidth = Math.max(10, CONTENT_WIDTH - prefixWidth - 2);
-			const words = w.text.split(/\s+/);
-			const wrapped: string[] = [];
-			let cur = "";
-			for (const word of words) {
-				if (!cur.length) {
-					cur = word;
-				} else if (cur.length + 1 + word.length <= maxTextWidth) {
-					cur += " " + word;
-				} else {
-					wrapped.push(cur);
-					cur = word;
-				}
-			}
-			if (cur) wrapped.push(cur);
-			wrapped.forEach((seg, idx) => {
-				const raw = idx === 0 ? prefix + seg : " ".repeat(prefixWidth) + seg;
-				block.push(theme.fg(w.severity, truncateToWidth(raw, CONTENT_WIDTH)));
-			});
-		}
-		block.push(hr(theme, CONTENT_WIDTH));
+		block.push(...fullDashboard(theme, data));
+	} else if (useCompact) {
+		block.push(...compactDashboard(theme, data, contentWidth));
+	} else {
+		block.push(...minimalDashboard(theme, data, contentWidth));
 	}
 
-	block.push(...bannerColored);
-	block.push("");
-	block.push(...composeColumns(leftCol, rightCol));
-	block.push(hr(theme, CONTENT_WIDTH));
-
-	// Footer tips
-	block.push(
-		centerInWidth(theme.fg("muted", "💡 ") + theme.fg("text", tipOfTheMoment()), CONTENT_WIDTH),
-	);
-	block.push(
-		centerInWidth(
-			theme.fg("dim", "Pi can explain and extend itself — just ask."),
-			CONTENT_WIDTH,
-		),
-	);
-	block.push(
-		centerInWidth(
-			theme.fg("dim", "Start typing to begin — this dashboard clears on your first message."),
-			CONTENT_WIDTH,
-		),
-	);
-	block.push(hr(theme, CONTENT_WIDTH, "━"));
-
-	// Center the whole block within the terminal width
-	const outerPad = Math.max(0, Math.floor((width - CONTENT_WIDTH) / 2));
-	const padStr = " ".repeat(outerPad);
-	return block.map((line) => padStr + line);
-}
-
-// ── extension ───────────────────────────────────────────────────────────────
-
-// Global warning capture ---------------------------------------------------
-// Installed once at module load; feeds a shared buffer that the dashboard reads.
-
-const capturedWarnings: Warning[] = [];
-const warningSubscribers = new Set<() => void>();
-const MAX_WARNINGS = 20;
-const MAX_WARNING_LEN = 300;
-
-function addCapturedWarning(w: Warning): void {
-	const text = String(w.text ?? "").replace(/\s+/g, " ").trim();
-	if (!text) return;
-	const clipped =
-		text.length > MAX_WARNING_LEN ? text.slice(0, MAX_WARNING_LEN - 1) + "…" : text;
-	if (capturedWarnings.some((x) => x.severity === w.severity && x.text === clipped)) return;
-	if (capturedWarnings.length >= MAX_WARNINGS) return;
-	capturedWarnings.push({ icon: w.icon, text: clipped, severity: w.severity });
-	for (const fn of warningSubscribers) {
-		try {
-			fn();
-		} catch {
-			/* ignore */
-		}
+	block.push(horizontalRule(theme, contentWidth));
+	if (width >= 32) {
+		block.push(
+			centered(theme.fg("accent", `💡 ${tipOfTheMoment()}`), contentWidth),
+		);
 	}
+	block.push(centered(theme.fg("dim", "Start typing to begin · /dashboard to return"), contentWidth));
+	block.push(horizontalRule(theme, contentWidth, "━"));
+
+	const outerPadding = useFull ? Math.max(0, Math.floor((width - contentWidth) / 2)) : 0;
+	const prefix = " ".repeat(outerPadding);
+	return block.map((line) => truncateToWidth(prefix + line, width, ""));
 }
 
-let globalCaptureInstalled = false;
-function installGlobalCapture(): void {
-	if (globalCaptureInstalled) return;
-	globalCaptureInstalled = true;
-
-	const fmt = (args: unknown[]): string =>
-		args
-			.map((a) => {
-				if (a instanceof Error) return a.stack || `${a.name}: ${a.message}`;
-				if (typeof a === "string") return a;
-				try {
-					return JSON.stringify(a);
-				} catch {
-					return String(a);
-				}
-			})
-			.join(" ");
-
-	const origWarn = console.warn.bind(console);
-	const origError = console.error.bind(console);
-	console.warn = (...args: unknown[]) => {
-		addCapturedWarning({ severity: "warning", text: fmt(args) });
-		origWarn(...args);
-	};
-	console.error = (...args: unknown[]) => {
-		addCapturedWarning({ severity: "error", text: fmt(args) });
-		origError(...args);
-	};
-
-	process.on("warning", (w: Error & { name?: string }) => {
-		addCapturedWarning({
-			severity: "warning",
-			text: `${w.name ?? "Warning"}: ${w.message}`,
-		});
-	});
-	process.on("uncaughtException", (e: Error) => {
-		addCapturedWarning({ severity: "error", text: `Uncaught: ${e.message}` });
-	});
-	process.on("unhandledRejection", (reason: unknown) => {
-		const msg =
-			reason instanceof Error
-				? reason.message
-				: typeof reason === "string"
-					? reason
-					: JSON.stringify(reason);
-		addCapturedWarning({ severity: "error", text: `Unhandled rejection: ${msg}` });
-	});
-}
-
-// Wrap ctx.ui.notify per-context so warning/error notifications get mirrored
-// into the band while pi still displays them inline.
-function wrapNotify(ctx: ExtensionContext): void {
-	const ui: any = ctx.ui;
-	if (!ui || typeof ui.notify !== "function" || ui.__dashboardWrapped) return;
-	const orig = ui.notify.bind(ui);
-	ui.notify = (message: string, severity?: string, ...rest: unknown[]) => {
-		if (severity === "warning" || severity === "error") {
-			addCapturedWarning({ severity: severity as Severity, text: String(message) });
-		}
-		return orig(message, severity, ...rest);
-	};
-	ui.__dashboardWrapped = true;
-}
-
-installGlobalCapture();
-
-async function collectEnvWarnings(ctx: ExtensionContext): Promise<Warning[]> {
-	const warnings: Warning[] = [];
+async function collectAuthWarnings(ctx: ExtensionContext): Promise<DashboardWarning[]> {
 	if (!ctx.model) {
-		warnings.push({
-			severity: "warning",
-			text: "No model selected — run /model or Ctrl+L to pick one.",
-		});
-		return warnings;
+		return [{ severity: "warning", text: "No model selected — run /model or use the configured model-selection key." }];
 	}
 	try {
 		const auth = await ctx.modelRegistry.getApiKeyAndHeaders(ctx.model);
-		if (!auth.ok) {
-			warnings.push({
-				severity: "error",
-				text: `No credentials for ${ctx.model.provider} — run /login or set an API key.`,
-			});
-		}
-	} catch (e) {
-		const msg = e instanceof Error ? e.message : String(e);
-		warnings.push({
+		return auth.ok
+			? []
+			: [{ severity: "error", text: `${auth.error} — run /login or configure credentials.` }];
+	} catch (error) {
+		return [{
 			severity: "error",
-			text: `Auth check failed for ${ctx.model.provider}: ${msg}`,
-		});
+			text: `Authentication check failed for ${ctx.model.provider}: ${error instanceof Error ? error.message : String(error)}`,
+		}];
 	}
-	return warnings;
 }
 
 export default function (pi: ExtensionAPI) {
 	let dashboardActive = false;
+	let viewMode: ViewMode = "auto";
+	let displayFont: DisplayFont = "braille";
+	let liveData: DashboardData | null = null;
+	let capturedTui: { requestRender?: () => void } | null = null;
+	let loadGeneration = 0;
+	let healthWarnings: DashboardWarning[] = [];
+	let omittedWarnings = 0;
 
-	function setEmptyHeader(ctx: ExtensionContext) {
-		if (!ctx.hasUI) return;
-		// Collapse the built-in header so nothing lingers when the dashboard is
-		// hidden. Pi's [Extensions]/[Themes] listings are suppressed separately
-		// via `quietStartup: true` in settings; diagnostics still render in
-		// pi's own loadedResourcesContainer, which sits directly beneath the
-		// header — i.e. beneath this dashboard.
-		ctx.ui.setHeader((_tui, _theme) => ({
-			render: (_width: number) => [],
-			invalidate: () => {},
-		}));
+	function requestRender(): void {
+		try {
+			capturedTui?.requestRender?.();
+		} catch {
+			// The component may have been disposed between the event and this render.
+		}
+	}
+
+	function storeWarnings(warnings: DashboardWarning[]): void {
+		for (const warning of warnings) {
+			const text = warning.text.replace(/\s+/g, " ").trim();
+			if (!text || healthWarnings.some((item) => item.severity === warning.severity && item.text === text)) continue;
+			if (healthWarnings.length < MAX_WARNINGS) healthWarnings.push({ ...warning, text });
+			else omittedWarnings++;
+		}
+	}
+
+	async function getGitInfo(cwd: string): Promise<GitInfo> {
+		try {
+			const result = await pi.exec("git", ["status", "--porcelain=v1", "--branch"], { cwd, timeout: 1000 });
+			if (result.code !== 0) return null;
+			const lines = result.stdout.trimEnd().split("\n");
+			const header = lines[0]?.startsWith("## ") ? lines.shift()!.slice(3) : "HEAD";
+			const branch = header.replace(/^No commits yet on /, "").split("...")[0].trim() || "HEAD";
+			return { branch, dirtyCount: lines.filter(Boolean).length };
+		} catch {
+			return null;
+		}
+	}
+
+	async function getRecentSessions(ctx: ExtensionContext): Promise<RecentSession[]> {
+		const activePath = ctx.sessionManager.getSessionFile();
+		const sessions = await SessionManager.list(ctx.cwd);
+		return sessions
+			.filter((session) => session.path !== activePath)
+			.map((session) => ({
+				path: session.path,
+				modified: session.modified.getTime(),
+				name: session.name,
+				firstMessage: session.firstMessage,
+				messageCount: session.messageCount,
+			}))
+			.sort((left, right) => right.modified - left.modified);
 	}
 
 	async function collectData(ctx: ExtensionContext): Promise<DashboardData> {
-		let sessions: DashboardData["sessions"] = [];
-		try {
-			const list = await SessionManager.list(ctx.cwd);
-			sessions = (list as any[])
-				.filter((s) => s && typeof s.file === "string")
-				.map((s) => ({
-					file: s.file as string,
-					mtime: (s.mtime ?? s.modifiedAt ?? s.updatedAt ?? Date.now()) as number,
-					name: (s.name ?? s.displayName ?? undefined) as string | undefined,
-					messageCount: (s.messageCount ?? s.entryCount ?? undefined) as number | undefined,
-				}))
-				.sort((a, b) => b.mtime - a.mtime);
-			const active = ctx.sessionManager.getSessionFile?.();
-			if (active) sessions = sessions.filter((s) => s.file !== active);
-		} catch {
-			// ignore
-		}
+		const [gitResult, sessionsResult, authResult] = await Promise.allSettled([
+			getGitInfo(ctx.cwd),
+			getRecentSessions(ctx),
+			collectAuthWarnings(ctx),
+		]);
 
-		// Read active theme from settings.json (project first, then global).
-		let activeTheme: string | undefined;
-		for (const p of [
-			join(ctx.cwd, ".pi", "settings.json"),
-			join(homedir(), ".pi", "agent", "settings.json"),
-		]) {
-			try {
-				if (!existsSync(p)) continue;
-				const raw = require("node:fs").readFileSync(p, "utf8");
-				const parsed = JSON.parse(raw);
-				if (parsed?.theme) {
-					activeTheme = parsed.theme;
-					break;
-				}
-			} catch {
-				// ignore
-			}
+		if (sessionsResult.status === "rejected") {
+			storeWarnings([{ severity: "warning", text: `Could not list recent sessions: ${String(sessionsResult.reason)}` }]);
 		}
+		if (authResult.status === "fulfilled") storeWarnings(authResult.value);
+		else storeWarnings([{ severity: "warning", text: `Could not check model credentials: ${String(authResult.reason)}` }]);
 
-		const envWarnings = await collectEnvWarnings(ctx);
-		for (const w of envWarnings) addCapturedWarning(w);
+		const context = ctx.getContextUsage();
+		const extensionSources = [
+			...pi.getCommands()
+				.filter(
+					(command) => command.source === "extension" && !command.sourceInfo.path.startsWith("<"),
+				)
+				.map((command) => command.sourceInfo),
+			...pi.getAllTools()
+				.filter(
+					(tool) =>
+						tool.sourceInfo.source !== "builtin" &&
+						tool.sourceInfo.source !== "sdk" &&
+						!tool.sourceInfo.path.startsWith("<"),
+				)
+				.map((tool) => tool.sourceInfo),
+		];
+		const extensions = [...new Set(extensionSources.map(extensionLabel))].sort();
 
 		return {
 			cwd: ctx.cwd,
-			git: getGitInfo(ctx.cwd),
+			git: gitResult.status === "fulfilled" ? gitResult.value : null,
 			modelId: ctx.model?.id,
 			provider: ctx.model?.provider,
-			extensions: listExtensions(),
-			themes: listThemes(),
-			activeTheme,
-			sessions,
-			warnings: [...capturedWarnings],
+			thinkingLevel: ctx.thinkingLevel,
+			contextTokens: context?.tokens ?? null,
+			contextWindow: context?.contextWindow ?? ctx.model?.contextWindow ?? null,
+			contextPercent: context?.percent ?? null,
+			activeTheme: ctx.ui.theme.name,
+			extensions,
+			sessions: sessionsResult.status === "fulfilled" ? sessionsResult.value : [],
+			warnings: [...healthWarnings],
+			omittedWarnings,
 		};
 	}
 
-	// Live-updating dashboard: later warnings patch liveData and request re-render.
-	let liveData: DashboardData | null = null;
-	let capturedTui: any = null;
-	let unsubscribe: (() => void) | null = null;
+	function setEmptyHeader(ctx: ExtensionContext): void {
+		if (ctx.mode !== "tui") return;
+		ctx.ui.setHeader(() => ({ render: () => [], invalidate() {} }));
+	}
 
-	function showDashboard(ctx: ExtensionContext, data: DashboardData) {
+	function showDashboard(ctx: ExtensionContext, data: DashboardData): void {
+		if (ctx.mode !== "tui") return;
 		dashboardActive = true;
 		liveData = data;
-		// Render the dashboard AS the header so pi's own loaded-resources /
-		// diagnostics band renders directly beneath it.
 		ctx.ui.setHeader((tui, theme) => {
 			capturedTui = tui;
 			return {
-				render(width: number): string[] {
-					return renderDashboard(theme, liveData ?? data, Math.max(20, width));
+				render: (width: number) => {
+					if (liveData) liveData.activeTheme = theme.name;
+					return renderDashboard(
+						theme,
+						liveData ?? data,
+						width,
+						tui.terminal.rows,
+						viewMode,
+						displayFont,
+					);
 				},
 				invalidate() {},
+				dispose() {
+					if (capturedTui === tui) capturedTui = null;
+				},
 			};
 		});
-
-		if (unsubscribe) unsubscribe();
-		const onWarn = () => {
-			if (!liveData) return;
-			liveData.warnings = [...capturedWarnings];
-			try {
-				capturedTui?.requestRender?.();
-			} catch {
-				/* ignore */
-			}
-		};
-		warningSubscribers.add(onWarn);
-		unsubscribe = () => warningSubscribers.delete(onWarn);
 	}
 
-	function hideDashboard(ctx: ExtensionContext) {
-		if (!dashboardActive) return;
+	function hideDashboard(ctx: ExtensionContext, restoreBuiltin: boolean): void {
+		loadGeneration++;
 		dashboardActive = false;
 		liveData = null;
 		capturedTui = null;
-		if (unsubscribe) {
-			unsubscribe();
-			unsubscribe = null;
-		}
-		setEmptyHeader(ctx);
+		if (ctx.mode !== "tui") return;
+		if (restoreBuiltin) ctx.ui.setHeader(undefined);
+		else setEmptyHeader(ctx);
 	}
 
-	pi.on("session_start", async (event, ctx) => {
-		if (!ctx.hasUI) return;
-		if (event.reason !== "startup") return;
-
-		// Empty out the built-in header immediately so no duplicate info appears
-		// while we gather data.
-		setEmptyHeader(ctx);
-		// Mirror warning/error notify() calls into the band.
-		wrapNotify(ctx);
-
-		const branch = ctx.sessionManager.getBranch?.() ?? [];
-		const hasMessages = branch.some(
-			(e: any) =>
-				e?.type === "message" && (e.message?.role === "user" || e.message?.role === "assistant"),
-		);
-		if (hasMessages) return;
-
+	async function refreshAndShow(ctx: ExtensionContext): Promise<void> {
+		if (ctx.mode !== "tui") return;
+		const generation = ++loadGeneration;
 		const data = await collectData(ctx);
+		if (generation !== loadGeneration) return;
 		showDashboard(ctx, data);
+	}
+
+	pi.on("session_start", async (_event, ctx) => {
+		if (ctx.mode !== "tui") return;
+		const branch = ctx.sessionManager.getBranch();
+		const hasConversation = branch.some(
+			(entry) => entry.type === "message" && (entry.message.role === "user" || entry.message.role === "assistant"),
+		);
+		if (hasConversation) return;
+		await refreshAndShow(ctx);
 	});
 
-	// Clear on first user input.
-	pi.on("input", async (_event, ctx) => {
-		hideDashboard(ctx);
+	pi.on("input", (_event, ctx) => {
+		hideDashboard(ctx, false);
 		return { action: "continue" };
 	});
 
+	pi.on("model_select", (event) => {
+		if (!liveData) return;
+		liveData.modelId = event.model.id;
+		liveData.provider = event.model.provider;
+		requestRender();
+	});
+
+	pi.on("thinking_level_select", (event) => {
+		if (!liveData) return;
+		liveData.thinkingLevel = event.level;
+		requestRender();
+	});
+
+	pi.on("session_shutdown", () => {
+		loadGeneration++;
+		dashboardActive = false;
+		liveData = null;
+		capturedTui = null;
+	});
+
 	pi.registerCommand("dashboard", {
-		description: "Dashboard: /dashboard [on|off|warnings|clear]",
+		description: "Toggle the startup dashboard or configure its layout",
+		getArgumentCompletions: (prefix) => {
+			const values = [
+				"on", "off", "auto", "full", "compact", "font braille", "font pixel", "font line", "font heavy", "warnings", "clear",
+			];
+			const matches = values.filter((value) => value.startsWith(prefix.toLowerCase()));
+			return matches.length ? matches.map((value) => ({ value, label: value })) : null;
+		},
 		handler: async (args, ctx) => {
-			const arg = args.trim().toLowerCase();
-			if (arg === "off" || arg === "hide") {
-				hideDashboard(ctx);
-				ctx.ui.notify("Dashboard hidden", "info");
-				return;
-			}
-			if (arg === "warnings" || arg === "errors") {
-				if (capturedWarnings.length === 0) {
-					ctx.ui.notify("No warnings or errors captured this session.", "info");
+			const argument = args.trim().toLowerCase();
+			if (!argument) {
+				if (dashboardActive) {
+					hideDashboard(ctx, true);
+					ctx.ui.notify("Dashboard hidden; built-in header restored", "info");
 				} else {
-					for (const w of capturedWarnings) ctx.ui.notify(w.text, w.severity as any);
+					await refreshAndShow(ctx);
 				}
 				return;
 			}
-			if (arg === "clear") {
-				capturedWarnings.length = 0;
-				if (liveData) liveData.warnings = [];
-				try {
-					capturedTui?.requestRender?.();
-				} catch {
-					/* ignore */
-				}
-				ctx.ui.notify("Cleared captured warnings.", "info");
+			if (argument === "off" || argument === "hide") {
+				hideDashboard(ctx, true);
+				ctx.ui.notify("Dashboard hidden; built-in header restored", "info");
 				return;
 			}
-			wrapNotify(ctx);
-			const data = await collectData(ctx);
-			showDashboard(ctx, data);
-			if (arg && arg !== "on" && arg !== "show") {
-				ctx.ui.notify(`Unknown arg '${arg}', showing dashboard`, "info");
+			if (argument === "warnings" || argument === "errors") {
+				if (healthWarnings.length === 0) ctx.ui.notify("No dashboard health warnings.", "info");
+				else for (const warning of healthWarnings) ctx.ui.notify(warning.text, warning.severity);
+				if (omittedWarnings > 0) ctx.ui.notify(`${omittedWarnings} additional warnings were omitted.`, "warning");
+				return;
 			}
+			if (argument === "clear") {
+				healthWarnings = [];
+				omittedWarnings = 0;
+				if (liveData) {
+					liveData.warnings = [];
+					liveData.omittedWarnings = 0;
+				}
+				requestRender();
+				ctx.ui.notify("Dashboard health warnings cleared", "info");
+				return;
+			}
+			if (argument === "auto" || argument === "full" || argument === "compact") {
+				viewMode = argument;
+				if (dashboardActive) requestRender();
+				else await refreshAndShow(ctx);
+				return;
+			}
+			if (
+				argument === "font braille" ||
+				argument === "font pixel" ||
+				argument === "font line" ||
+				argument === "font heavy"
+			) {
+				displayFont = argument.slice("font ".length) as DisplayFont;
+				if (dashboardActive) requestRender();
+				else await refreshAndShow(ctx);
+				return;
+			}
+			if (argument === "on" || argument === "show") {
+				await refreshAndShow(ctx);
+				return;
+			}
+			ctx.ui.notify(`Unknown dashboard option: ${argument}`, "warning");
 		},
 	});
 }
