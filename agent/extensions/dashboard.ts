@@ -51,6 +51,7 @@ const FULL_WIDTH = 74;
 const COLUMN_WIDTH = 36;
 const COLUMN_GAP = 2;
 const MAX_WARNINGS = 10;
+const HEADER_TOP_MARGIN_ROWS = 2;
 
 const LINE_GLYPHS: Record<string, [string, string]> = {
 	" ": [" ", " "],
@@ -416,7 +417,7 @@ function renderDashboard(
 	const useFull = width >= FULL_WIDTH && mode !== "compact" && (mode === "full" || heightAllowsFull);
 	const useCompact = !useFull && width >= 44 && heightAllowsCompact;
 	const contentWidth = useFull ? FULL_WIDTH : width;
-	const block: string[] = [horizontalRule(theme, contentWidth, "━")];
+	const block: string[] = [];
 
 	block.push(...warningLines(theme, data, contentWidth));
 	if (data.warnings.length > 0 || data.omittedWarnings > 0) block.push(horizontalRule(theme, contentWidth));
@@ -424,6 +425,7 @@ function renderDashboard(
 	if (useFull) {
 		const slogan = bigText(HEADER_SLOGAN, displayFont);
 		block.push(
+			...Array.from({ length: HEADER_TOP_MARGIN_ROWS }, () => ""),
 			...BANNER.map((line) => centered(theme.fg("error", line), contentWidth)),
 			"",
 			...slogan.map((line) => centered(theme.fg("error", line), contentWidth)),
