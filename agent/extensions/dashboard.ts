@@ -52,7 +52,7 @@ const FULL_WIDTH = 74;
 const COLUMN_WIDTH = 36;
 const COLUMN_GAP = 2;
 const MAX_WARNINGS = 10;
-const HEADER_TOP_MARGIN_ROWS = 2;
+const HEADER_TOP_MARGIN_ROWS = 3;
 
 const LINE_GLYPHS: Record<string, [string, string]> = {
 	" ": [" ", " "],

@@ -59,6 +59,17 @@ function joinPills(theme: Theme, pills: Pill[]): string {
 	return pills.map((pill) => renderPill(theme, pill)).join(" ");
 }
 
+function truncatePlain(value: string, maxWidth: number, ellipsis = "..."): string {
+	if (visibleWidth(value) <= maxWidth) return value;
+	const available = Math.max(0, maxWidth - visibleWidth(ellipsis));
+	let result = "";
+	for (const { segment } of new Intl.Segmenter(undefined, { granularity: "grapheme" }).segment(value)) {
+		if (visibleWidth(result + segment) > available) break;
+		result += segment;
+	}
+	return result + ellipsis;
+}
+
 function compactNumber(value: number): string {
 	if (value < 1_000) return `${Math.round(value)}`;
 	if (value < 10_000) return `${(value / 1_000).toFixed(1)}k`;
@@ -281,9 +292,9 @@ export default function (pi: ExtensionAPI) {
 		};
 		const workspacePill: Pill = {
 			background: "customMessageBg",
-			body: text(theme, "accent", "") + " " + text(theme, "text", truncateToWidth(project, 18), true),
+			body: text(theme, "accent", "") + " " + text(theme, "text", truncatePlain(project, 18), true),
 		};
-		const gitParts = [text(theme, "accent", ""), text(theme, "text", truncateToWidth(branch, detail === "full" ? 28 : 16), true)];
+		const gitParts = [text(theme, "accent", ""), text(theme, "text", truncatePlain(branch, detail === "full" ? 28 : 16), true)];
 		if (git) {
 			if (git.staged) gitParts.push(text(theme, "success", `+${git.staged}`));
 			if (git.modified) gitParts.push(text(theme, "warning", `~${git.modified}`));
@@ -294,7 +305,7 @@ export default function (pi: ExtensionAPI) {
 			}
 		}
 		const gitPill: Pill = { background: gitBackground(git), body: gitParts.join(" ") };
-		const fileLabel = detail === "full" || detail === "medium" ? truncateToWidth(file, 30) : basename(file);
+		const fileLabel = detail === "full" || detail === "medium" ? truncatePlain(file, 30) : basename(file);
 		const filesPill: Pill = {
 			background: "userMessageBg",
 			body:
@@ -308,7 +319,7 @@ export default function (pi: ExtensionAPI) {
 			body:
 				text(theme, "accent", "󰚩") +
 				" " +
-				text(theme, "text", truncateToWidth(model, detail === "full" ? 24 : 15), true) +
+				text(theme, "text", truncatePlain(model, detail === "full" ? 24 : 15), true) +
 				(detail === "full" || detail === "medium" ? divider(theme) + text(theme, `thinking${thinking[0].toUpperCase()}${thinking.slice(1)}` as ThemeColor, ` ${thinking}`) : ""),
 		};
 		const contextValue = context?.tokens === undefined
