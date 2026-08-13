@@ -7,6 +7,6 @@
   "quietStartup": true,
   "tuiMode": "fullscreen",
   "packages": [
-    "npm:@juicesharp/rpiv-web-tools"
+    "npm:pi-web-access"
   ]
 }
