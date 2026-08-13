@@ -5,5 +5,8 @@
   "defaultThinkingLevel": "xhigh",
   "theme": "rose-pine-moon",
   "quietStartup": true,
-  "tuiMode": "fullscreen"
+  "tuiMode": "fullscreen",
+  "packages": [
+    "npm:@juicesharp/rpiv-web-tools"
+  ]
 }

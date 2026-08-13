@@ -5,6 +5,7 @@
 # --- Credentials & per-machine state (NEVER commit) ---
 agent/auth.json
 agent/trust.json
+agent/.env
 
 # --- Caches / generated ---
 agent/models-store.json
