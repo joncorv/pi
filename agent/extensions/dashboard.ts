@@ -1,15 +1,16 @@
 /**
  * Responsive startup dashboard for pi.
  *
- * Shows only for an empty session and clears when the first message is sent.
+ * Shows for an empty startup/resumed session and clears when the first message is sent.
+ * A newly cleared session stays blank until /dash is invoked.
  * Data comes from pi's public APIs rather than filesystem discovery.
  *
- *   /dashboard                  Toggle the dashboard
- *   /dashboard on|off           Show or restore the built-in header
- *   /dashboard auto|full        Select the preferred layout
- *   /dashboard compact          Force the compact layout
- *   /dashboard font braille|pixel|line|heavy  Select the two-line display font
- *   /dashboard warnings|clear   Inspect or clear dashboard health checks
+ *   /dash                  Toggle the dashboard
+ *   /dash on|off           Show or restore the built-in header
+ *   /dash auto|full        Select the preferred layout
+ *   /dash compact          Force the compact layout
+ *   /dash font braille|pixel|line|heavy  Select the two-line display font
+ *   /dash warnings|clear   Inspect or clear dashboard health checks
  */
 
 import { basename, dirname } from "node:path";
@@ -444,7 +445,7 @@ function renderDashboard(
 			centered(theme.fg("accent", `💡 ${tipOfTheMoment()}`), contentWidth),
 		);
 	}
-	block.push(centered(theme.fg("dim", "Start typing to begin · /dashboard to return"), contentWidth));
+	block.push(centered(theme.fg("dim", "Start typing to begin · /dash to return"), contentWidth));
 	block.push(horizontalRule(theme, contentWidth, "━"));
 
 	const outerPadding = useFull ? Math.max(0, Math.floor((width - contentWidth) / 2)) : 0;
@@ -621,8 +622,12 @@ export default function (pi: ExtensionAPI) {
 		showDashboard(ctx, data);
 	}
 
-	pi.on("session_start", async (_event, ctx) => {
+	pi.on("session_start", async (event, ctx) => {
 		if (ctx.mode !== "tui") return;
+		if (event.reason === "new") {
+			setEmptyHeader(ctx);
+			return;
+		}
 		const branch = ctx.sessionManager.getBranch();
 		const hasConversation = branch.some(
 			(entry) => entry.type === "message" && (entry.message.role === "user" || entry.message.role === "assistant"),
@@ -656,7 +661,7 @@ export default function (pi: ExtensionAPI) {
 		capturedTui = null;
 	});
 
-	pi.registerCommand("dashboard", {
+	pi.registerCommand("dash", {
 		description: "Toggle the startup dashboard or configure its layout",
 		getArgumentCompletions: (prefix) => {
 			const values = [
