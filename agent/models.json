@@ -1,0 +1,39 @@
+{
+  "providers": {
+    "ollama": {
+      "baseUrl": "http://127.0.0.1:11434/v1",
+      "api": "openai-completions",
+      "apiKey": "ollama",
+      "compat": {
+        "supportsDeveloperRole": false,
+        "supportsReasoningEffort": false
+      },
+      "models": [
+        {
+          "id": "qwen3.6:35b-a3b",
+          "name": "Qwen 3.6 35B A3B (Ollama)",
+          "reasoning": true,
+          "input": ["text", "image"],
+          "contextWindow": 262144,
+          "maxTokens": 16384
+        },
+        {
+          "id": "qwen3-coder:30b",
+          "name": "Qwen3 Coder 30B (Ollama)",
+          "reasoning": false,
+          "input": ["text"],
+          "contextWindow": 262144,
+          "maxTokens": 16384
+        },
+        {
+          "id": "muse-glimmer:latest",
+          "name": "Muse Glimmer 30B (Ollama)",
+          "reasoning": true,
+          "input": ["text", "image"],
+          "contextWindow": 131072,
+          "maxTokens": 16384
+        }
+      ]
+    }
+  }
+}
