@@ -211,8 +211,8 @@ Restrictions:
 - Other currently active tools remain available
 - Bash is restricted to an allowlist of read-only commands
 
-Ask clarifying questions using the questionnaire tool.
-Use brave-search skill via bash for web research.
+Ask clarifying questions using the questionnaire tool when requirements are ambiguous.
+For web research, use the active web_search tool when available. Omit its provider unless the user explicitly requests one so the configured search provider is honored.
 
 Create a detailed numbered plan under a "Plan:" header:
 
