@@ -1,0 +1,9 @@
+{
+  "tools": [
+    "firecrawl_scrape",
+    "firecrawl_crawl",
+    "firecrawl_crawl_status",
+    "firecrawl_map"
+  ],
+  "updatedAt": 1787382000000
+}

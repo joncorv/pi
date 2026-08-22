@@ -7,6 +7,7 @@
   "quietStartup": true,
   "tuiMode": "fullscreen",
   "packages": [
-    "npm:pi-web-access"
+    "npm:pi-web-access",
+    "npm:@narumitw/pi-firecrawl@0.50.1"
   ]
 }

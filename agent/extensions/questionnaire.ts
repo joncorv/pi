@@ -90,9 +90,6 @@ export default function questionnaire(pi: ExtensionAPI) {
 		parameters: QuestionnaireParams,
 
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-			if (ctx.mode !== "tui") {
-				return errorResult("Error: UI not available (running in non-interactive mode)");
-			}
 			if (params.questions.length === 0) {
 				return errorResult("Error: No questions provided");
 			}
@@ -103,6 +100,54 @@ export default function questionnaire(pi: ExtensionAPI) {
 				label: q.label || `Q${i + 1}`,
 				allowOther: q.allowOther !== false,
 			}));
+
+			// RPC supports Pi's standard select/input dialogs but not custom TUI
+			// components. Ask sequentially there so routing questionnaires also work
+			// for remote clients. Print/JSON modes remain explicitly unsupported.
+			if (ctx.mode !== "tui") {
+				if (!ctx.hasUI) {
+					return errorResult("Error: UI not available (running in non-interactive mode)", questions);
+				}
+
+				const answers: Answer[] = [];
+				for (const question of questions) {
+					const labels = question.options.map((option) => option.label);
+					if (question.allowOther) labels.push("Type something.");
+					const selected = await ctx.ui.select(question.prompt, labels);
+					if (!selected) {
+						return errorResult("User cancelled the questionnaire", questions);
+					}
+
+					const optionIndex = question.options.findIndex((option) => option.label === selected);
+					if (optionIndex >= 0) {
+						const option = question.options[optionIndex];
+						answers.push({
+							id: question.id,
+							value: option.value,
+							label: option.label,
+							wasCustom: false,
+							index: optionIndex + 1,
+						});
+						continue;
+					}
+
+					const custom = await ctx.ui.input(question.prompt, "Type your answer");
+					if (custom === undefined) {
+						return errorResult("User cancelled the questionnaire", questions);
+					}
+					const trimmed = custom.trim() || "(no response)";
+					answers.push({ id: question.id, value: trimmed, label: trimmed, wasCustom: true });
+				}
+
+				const result: QuestionnaireResult = { questions, answers, cancelled: false };
+				const answerLines = answers.map((answer) => {
+					const questionLabel = questions.find((question) => question.id === answer.id)?.label || answer.id;
+					return answer.wasCustom
+						? `${questionLabel}: user wrote: ${answer.label}`
+						: `${questionLabel}: user selected: ${answer.index}. ${answer.label}`;
+				});
+				return { content: [{ type: "text" as const, text: answerLines.join("\n") }], details: result };
+			}
 
 			const isMulti = questions.length > 1;
 			const totalTabs = questions.length + 1; // questions + Submit

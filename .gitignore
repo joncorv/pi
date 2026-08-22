@@ -11,6 +11,7 @@ agent/.env
 agent/models-store.json
 agent/logs/
 agent/cache/
+web-search-cache/
 
 # --- Installed packages (reproducible from settings.json) ---
 agent/git/

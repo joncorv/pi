@@ -1,5 +1,13 @@
 {
-  "workflow": "auto-summary",
-  "provider": "duckduckgo",
-  "allowBrowserCookies": true
+  "workflow": "none",
+  "provider": "auto",
+  "allowBrowserCookies": true,
+  "searchRouting": {
+    "providers": ["openai", "exa", "duckduckgo"],
+    "fallbackOn": ["transient", "quota", "network", "invalid-response"]
+  },
+  "firecrawlBaseUrl": "https://api.firecrawl.dev",
+  "firecrawlApiKey": "$FIRECRAWL_API_KEY",
+  "firecrawlApiVersion": "v2",
+  "firecrawlFreshScrape": true
 }
