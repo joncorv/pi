@@ -273,7 +273,12 @@ export default function (pi: ExtensionAPI) {
 		}
 	}
 
-	function buildPills(ctx: ExtensionContext, theme: Theme, detail: "full" | "medium" | "compact" | "minimal") {
+	function buildPills(
+		ctx: ExtensionContext,
+		theme: Theme,
+		detail: "full" | "medium" | "compact" | "minimal",
+		planStatus?: string,
+	) {
 		const state = activityLabel(activity, activeTool);
 		const context = ctx.getContextUsage();
 		const contextWindow = context?.contextWindow ?? ctx.model?.contextWindow ?? 0;
@@ -290,6 +295,9 @@ export default function (pi: ExtensionAPI) {
 			background: state.bg,
 			body: text(theme, state.color, `${state.icon} ${state.label}`, true),
 		};
+		const planPill: Pill | undefined = planStatus
+			? { background: "toolPendingBg", body: planStatus }
+			: undefined;
 		const workspacePill: Pill = {
 			background: "customMessageBg",
 			body: text(theme, "accent", "") + " " + text(theme, "text", truncatePlain(project, 18), true),
@@ -343,22 +351,36 @@ export default function (pi: ExtensionAPI) {
 		if (detail !== "compact" && detail !== "minimal") usageParts.push(text(theme, "warning", `$${usage.cost.toFixed(3)}`));
 		const usagePill: Pill = { background: "selectedBg", body: usageParts.join(" ") };
 
-		if (detail === "full") return { left: [modePill, workspacePill, gitPill, filesPill], right: [modelPill, contextPill, usagePill] };
-		if (detail === "medium") return { left: [modePill, gitPill, filesPill], right: [modelPill, contextPill, usagePill] };
-		if (detail === "compact") return { left: [gitPill, filesPill], right: [modelPill, contextPill] };
-		return { left: [filesPill], right: [contextPill] };
+		const planPills = planPill ? [planPill] : [];
+		if (detail === "full") {
+			return {
+				left: [modePill, ...planPills, workspacePill, gitPill, filesPill],
+				right: [modelPill, contextPill, usagePill],
+			};
+		}
+		if (detail === "medium") {
+			return {
+				left: [modePill, ...planPills, gitPill, filesPill],
+				right: [modelPill, contextPill, usagePill],
+			};
+		}
+		if (detail === "compact") {
+			return { left: [...planPills, gitPill, filesPill], right: [modelPill, contextPill] };
+		}
+		return { left: [...planPills, filesPill], right: [contextPill] };
 	}
 
-	function renderStatusline(ctx: ExtensionContext, theme: Theme, width: number): string {
+	function renderStatusline(ctx: ExtensionContext, theme: Theme, width: number, planStatus?: string): string {
 		for (const detail of ["full", "medium", "compact", "minimal"] as const) {
-			const pills = buildPills(ctx, theme, detail);
+			const pills = buildPills(ctx, theme, detail, planStatus);
 			const left = joinPills(theme, pills.left);
 			const right = joinPills(theme, pills.right);
 			const used = visibleWidth(left) + visibleWidth(right);
 			if (used + 1 <= width) return left + " ".repeat(width - used) + right;
 		}
 		const context = ctx.getContextUsage();
-		return truncateToWidth(`ctx ${context?.percent === null || context?.percent === undefined ? "?" : `${Math.round(context.percent)}%`}`, width, "");
+		const contextText = `ctx ${context?.percent === null || context?.percent === undefined ? "?" : `${Math.round(context.percent)}%`}`;
+		return truncateToWidth(planStatus ? `${planStatus} ${contextText}` : contextText, width, "");
 	}
 
 	function install(ctx: ExtensionContext): void {
@@ -369,7 +391,9 @@ export default function (pi: ExtensionAPI) {
 			const unsubscribe = footerData.onBranchChange(() => void refreshGit());
 			return {
 				invalidate() {},
-				render: (width: number) => [renderStatusline(ctx, theme, width)],
+				render: (width: number) => [
+					renderStatusline(ctx, theme, width, footerData.getExtensionStatuses().get("plan-mode")),
+				],
 				dispose() {
 					unsubscribe();
 					requestRender = undefined;
