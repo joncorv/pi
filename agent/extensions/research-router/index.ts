@@ -1,6 +1,6 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
-type ResearchRoute = "quick" | "deep" | "scrape";
+type ResearchRoute = "openai" | "quick" | "deep" | "scrape";
 type RouteResolution = ResearchRoute | "cancelled" | undefined;
 
 type SearchInput = {
@@ -16,6 +16,11 @@ type SearchInput = {
 type UserRequest = { id: string; text: string; index: number };
 
 const NETWORK_TOOLS = new Set(["web_search", "source_check", "fetch_content"]);
+const OPENAI_PATTERNS = [
+	/\bopenai\s+(?:(?:hosted|web)\s+)?search\b/i,
+	/\bsearch(?:\s+the\s+web)?\s+(?:with|using|via)\s+openai\b/i,
+	/\bcodex(?:[- ]backed)?\s+(?:web\s+)?search\b/i,
+];
 const QUICK_PATTERNS = [
 	/\bquick(?:\s+(?:web\s+)?(?:search|lookup))?\b/i,
 	/\blightweight\s+(?:search|lookup)\b/i,
@@ -53,16 +58,15 @@ function messageText(content: unknown): string {
 }
 
 export function explicitRoute(text: string): ResearchRoute | undefined {
-	const quick = QUICK_PATTERNS.some((pattern) => pattern.test(text));
-	const deep = DEEP_PATTERNS.some((pattern) => pattern.test(text));
-	const scrape = SCRAPE_PATTERNS.some((pattern) => pattern.test(text));
-
-	if (quick && (deep || scrape)) return undefined;
-	if (deep) return "deep";
-	if (scrape) return "scrape";
-	if (quick) return "quick";
-	if (URL_PATTERN.test(text) && URL_EXTRACTION_PATTERN.test(text)) return "scrape";
-	return undefined;
+	const matches: ResearchRoute[] = [];
+	if (OPENAI_PATTERNS.some((pattern) => pattern.test(text))) matches.push("openai");
+	if (QUICK_PATTERNS.some((pattern) => pattern.test(text))) matches.push("quick");
+	if (DEEP_PATTERNS.some((pattern) => pattern.test(text))) matches.push("deep");
+	if (SCRAPE_PATTERNS.some((pattern) => pattern.test(text))) matches.push("scrape");
+	if (matches.length === 0 && URL_PATTERN.test(text) && URL_EXTRACTION_PATTERN.test(text)) {
+		matches.push("scrape");
+	}
+	return matches.length === 1 ? matches[0] : undefined;
 }
 
 function latestUserRequest(ctx: ExtensionContext): UserRequest | undefined {
@@ -95,7 +99,12 @@ function questionnaireRoute(ctx: ExtensionContext, request: UserRequest): RouteR
 		if (!Array.isArray(message.details.answers)) continue;
 		for (const answer of message.details.answers) {
 			if (!isRecord(answer) || answer.id !== "research_mode") continue;
-			if (answer.value === "quick" || answer.value === "deep" || answer.value === "scrape") {
+			if (
+				answer.value === "openai" ||
+				answer.value === "quick" ||
+				answer.value === "deep" ||
+				answer.value === "scrape"
+			) {
 				return answer.value;
 			}
 			if (answer.value === "cancel") return "cancelled";
@@ -123,6 +132,20 @@ function firstQuery(input: SearchInput): string | undefined {
 	);
 }
 
+export function applyOpenAIRoute(toolName: string, input: SearchInput): void {
+	if (toolName === "web_search") {
+		input.numResults = boundedResults(input.numResults, 10, 8, 20);
+		input.includeContent = true;
+		input.workflow = "none";
+		input.provider = "openai";
+	}
+	if (toolName === "source_check") {
+		input.numResults = boundedResults(input.numResults, 10, 8, 20);
+		input.fetchContent = true;
+		input.provider = "openai";
+	}
+}
+
 export function applyQuickRoute(toolName: string, input: SearchInput): void {
 	if (toolName === "web_search") {
 		const query = firstQuery(input);
@@ -133,12 +156,12 @@ export function applyQuickRoute(toolName: string, input: SearchInput): void {
 		input.numResults = boundedResults(input.numResults, 5, 1, 5);
 		input.includeContent = false;
 		input.workflow = "none";
-		delete input.provider;
+		input.provider = "duckduckgo";
 	}
 	if (toolName === "source_check") {
 		input.numResults = boundedResults(input.numResults, 5, 1, 5);
 		input.fetchContent = false;
-		delete input.provider;
+		input.provider = "duckduckgo";
 	}
 }
 
@@ -170,8 +193,11 @@ function isNetworkTool(toolName: string): boolean {
 }
 
 function routeGuidance(route: RouteResolution): string {
+	if (route === "openai") {
+		return "Research route: OPENAI. Use 2-4 genuinely varied web_search queries when useful, request 8-20 results, retrieve full source content, and synthesize a cited answer. The research router will force the OpenAI hosted search provider.";
+	}
 	if (route === "quick") {
-		return "Research route: QUICK. Use one focused web_search query, at most five results, and avoid full-page retrieval unless the user explicitly asks for it.";
+		return "Research route: QUICK. Use one focused web_search query, at most five results, and avoid full-page retrieval. The research router will force DuckDuckGo.";
 	}
 	if (route === "deep") {
 		return "Research route: DEEP. Use 2-4 genuinely varied searches, inspect full source content, verify consequential claims, preserve URLs, and produce a cited synthesis. Use bounded Firecrawl map/crawl operations only when site-wide acquisition is useful.";
@@ -186,7 +212,8 @@ function routeGuidance(route: RouteResolution): string {
     "label": "Research mode",
     "prompt": "How should I approach this web task?",
     "options": [
-      { "value": "quick", "label": "Quick lookup", "description": "Fast; one focused query, a few results, and minimal retrieval." },
+      { "value": "openai", "label": "OpenAI Search", "description": "Broader search; multiple queries, 8-20 results, full-source retrieval, and cited synthesis using OpenAI hosted search." },
+      { "value": "quick", "label": "Quick lookup — DuckDuckGo", "description": "Fast; one focused query, up to five results, and minimal retrieval." },
       { "value": "deep", "label": "Deep research", "description": "Slower; multiple searches, full sources, verification, and citations. May use Firecrawl credits." },
       { "value": "scrape", "label": "Web scrape or crawl", "description": "Fetch known pages or crawl a specified site. May use Firecrawl credits." },
       { "value": "cancel", "label": "Cancel", "description": "Make no network request." }
@@ -218,6 +245,7 @@ export default function researchRouter(pi: ExtensionAPI) {
 		}
 
 		const input = event.input as SearchInput;
+		if (route === "openai") applyOpenAIRoute(event.toolName, input);
 		if (route === "quick") applyQuickRoute(event.toolName, input);
 		if (route === "deep") applyDeepRoute(event.toolName, input);
 		if (route === "scrape") applyScrapeRoute(event.toolName, input);

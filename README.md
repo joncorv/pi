@@ -14,8 +14,9 @@ Keep `agent/.env` owner-only (`chmod 600 agent/.env`) and never commit it. Run `
 
 ## Web research modes
 
-- `/quick-search <query>` — one lightweight search with at most five results.
+- **OpenAI Search** — broader hosted search with multiple queries, 8–20 results, full-source retrieval, and cited synthesis.
+- `/quick-search <query>` — one lightweight DuckDuckGo search with at most five results.
 - `/skill:deep-research <topic>` — multi-source Firecrawl research, verification, and cited synthesis.
 - `/web-scrape <url> [instructions]` — fetch, scrape, map, or crawl known targets.
 
-For ambiguous web requests, the research router asks whether to use quick search, deep research, or web scrape/crawl before allowing a network tool to run.
+For ambiguous web requests, the research router asks whether to use OpenAI Search, quick DuckDuckGo lookup, deep Firecrawl research, or web scrape/crawl before allowing a network tool to run. Explicit requests such as “use OpenAI Search” select the hosted OpenAI route directly.
